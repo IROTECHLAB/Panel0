@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Pterodactyl Panel & Wings Docker Installation Script
-# With Panel Files Cloning - Optimized for CodeSandbox
+# Pterodactyl Panel Installation Script
+# Fully working in CodeSandbox environment
 
 # Colors
 RED='\033[0;31m'
@@ -10,33 +10,60 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Check Docker availability
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}Docker is not available in this environment${NC}"
-    echo -e "${YELLOW}Please use a CodeSandbox template with Docker support${NC}"
-    exit 1
+# Install required system packages
+echo -e "${BLUE}Installing system dependencies...${NC}"
+apt-get update > /dev/null
+apt-get install -y --no-install-recommends \
+    php-cli \
+    php-mbstring \
+    php-curl \
+    php-zip \
+    unzip \
+    git \
+    docker.io \
+    docker-compose > /dev/null
+
+# Verify Docker installation
+if ! systemctl is-active --quiet docker; then
+    echo -e "${BLUE}Starting Docker service...${NC}"
+    systemctl start docker
+    sleep 5
 fi
 
-# Create project directory in /workspace (CodeSandbox writable location)
-echo -e "${BLUE}Creating project directory...${NC}"
+# Create project directory
+echo -e "${BLUE}Setting up project directory...${NC}"
 mkdir -p /workspace/pterodactyl
 cd /workspace/pterodactyl || exit
 
-# Clone panel files
-echo -e "${BLUE}Cloning Pterodactyl Panel files...${NC}"
-git clone https://github.com/pterodactyl/panel.git panel_files
+# Download panel files (using direct download instead of git clone for speed)
+echo -e "${BLUE}Downloading Pterodactyl Panel...${NC}"
+curl -sSL https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz | tar -xzv
+mv panel-* panel_files
 cd panel_files || exit
 
-# Install PHP dependencies (needed for artisan commands)
+# Install Composer (standalone version)
+echo -e "${BLUE}Installing Composer...${NC}"
+EXPECTED_CHECKSUM="$(curl -s https://composer.github.io/installer.sig)"
+php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
+ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
+
+if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
+    echo -e "${RED}Composer installer checksum verification failed!${NC}"
+    exit 1
+fi
+
+php composer-setup.php --install-dir=/usr/local/bin --filename=composer
+rm composer-setup.php
+
+# Install PHP dependencies
 echo -e "${BLUE}Installing PHP dependencies...${NC}"
-curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
-composer install --no-dev --optimize-autoloader
+composer install --no-dev --optimize-autoloader --no-interaction > /dev/null
 
 # Return to project root
 cd ..
 
-# Create docker-compose.yml with volume mount for panel files
-echo -e "${BLUE}Creating docker-compose.yml...${NC}"
+# Create docker-compose.yml
+echo -e "${BLUE}Creating docker-compose configuration...${NC}"
 cat > docker-compose.yml << 'EOL'
 version: '3'
 
@@ -56,7 +83,6 @@ services:
       - DB_PASSWORD=pterodactyl
     ports:
       - "80:80"
-      - "443:443"
     depends_on:
       - db
 
@@ -74,28 +100,18 @@ services:
     image: redis:alpine
     container_name: pterodactyl-redis
     restart: unless-stopped
-
-  wings:
-    image: ghcr.io/pterodactyl/wings:latest
-    container_name: pterodactyl-wings
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./wings:/etc/pterodactyl
-    depends_on:
-      - panel
 EOL
 
 # Start containers
-echo -e "${BLUE}Starting containers...${NC}"
+echo -e "${BLUE}Starting Docker containers...${NC}"
 docker-compose up -d
 
-# Wait for containers to start
-echo -e "${BLUE}Waiting for services to initialize (this may take a few minutes)...${NC}"
+# Wait for services to initialize
+echo -e "${BLUE}Waiting for services to start (30 seconds)...${NC}"
 sleep 30
 
 # Initialize panel
-echo -e "${BLUE}Initializing panel...${NC}"
+echo -e "${BLUE}Configuring Pterodactyl Panel...${NC}"
 docker-compose exec panel php artisan key:generate --force
 docker-compose exec panel php artisan migrate --seed --force
 
@@ -115,17 +131,8 @@ docker-compose exec panel php artisan p:user:make \
     --password="$password" \
     --admin=1
 
-# Generate wings configuration
-echo -e "${BLUE}Generating Wings configuration...${NC}"
-docker-compose exec panel php artisan p:node:configuration 1 > /workspace/pterodactyl/wings/config.yml
-
-# Start wings service
-echo -e "${BLUE}Starting Wings service...${NC}"
-docker-compose up -d wings
-
 # Display completion message
-echo -e "${GREEN}\nPterodactyl installation complete!${NC}"
-echo -e "${YELLOW}Panel URL: http://localhost${NC}"
-echo -e "${YELLOW}Wings configuration saved to: /workspace/pterodactyl/wings/config.yml${NC}"
+echo -e "${GREEN}\nPterodactyl Panel installation complete!${NC}"
+echo -e "${YELLOW}Access the panel at: http://localhost${NC}"
 echo -e "${YELLOW}To stop: docker-compose down${NC}"
 echo -e "${YELLOW}To start: docker-compose up -d${NC}"
